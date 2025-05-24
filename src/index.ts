@@ -71,8 +71,6 @@ class HoneybadgerMCPServer {
       {
         name: 'honeybadger-mcp',
         version: '0.1.0',
-      },
-      {
         capabilities: {
           tools: {},
         },
@@ -191,19 +189,23 @@ class HoneybadgerMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
 
+      if (!args) {
+        throw new McpError(ErrorCode.InvalidRequest, 'Tool arguments are missing');
+      }
+
       try {
         switch (name) {
           case 'get_honeybadger_fault':
-            return await this.getFault(args.fault_id, args.project_id);
+            return await this.getFault(args.fault_id as string, args.project_id as string | undefined);
 
           case 'get_honeybadger_notices':
-            return await this.getNotices(args.fault_id, args.project_id, args.limit);
+            return await this.getNotices(args.fault_id as string, args.project_id as string | undefined, args.limit as number | undefined);
 
           case 'list_honeybadger_faults':
-            return await this.listFaults(args);
+            return await this.listFaults(args as any);
 
           case 'analyze_honeybadger_issue':
-            return await this.analyzeIssue(args.fault_id, args.project_id, args.include_context);
+            return await this.analyzeIssue(args.fault_id as string, args.project_id as string | undefined, args.include_context as boolean | undefined);
 
           default:
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
