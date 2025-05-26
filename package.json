@@ -19,7 +19,7 @@
     "error-tracking",
     "debugging"
   ],
-  "author": "Your Name",
+  "author": "Vishal Zambre",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.4.0",

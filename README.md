@@ -13,7 +13,7 @@ This MCP server integrates Honeybadger error tracking with Cursor IDE, allowing 
 ### 1. Clone the MCP Server
 
 ```bash
-git clone 
+git clone git@github.com:vishalzambre/honeybadger-mcp.git
 ```
 
 ### 2. Build the Project
@@ -39,7 +39,7 @@ HONEYBADGER_BASE_URL=https://app.honeybadger.io
 
 ### 4. Get Your Honeybadger Credentials
 
-1. **API Key**: 
+1. **API Key**:
    - Go to https://app.honeybadger.io/users/auth_tokens
    - Create a new Personal Auth Token
    - Copy the token for your `.env` file
