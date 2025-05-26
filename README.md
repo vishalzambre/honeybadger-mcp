@@ -14,6 +14,8 @@ This MCP server integrates Honeybadger error tracking with Cursor IDE, allowing 
 
 ```bash
 git clone git@github.com:vishalzambre/honeybadger-mcp.git
+cd honeybadger-mcp
+npm install
 ```
 
 ### 2. Build the Project
@@ -22,7 +24,56 @@ git clone git@github.com:vishalzambre/honeybadger-mcp.git
 npm run build
 ```
 
-### 3. Configure Environment Variables
+### 3. Using as an NPM Package (Recommended)
+
+**Global Installation:**
+
+```bash
+npm install -g honeybadger-mcp
+```
+
+Then configure it in Cursor:
+
+```json
+{
+  "mcpServers": {
+    "honeybadger": {
+      "command": "honeybadger-mcp",
+      "env": {
+        "HONEYBADGER_API_KEY": "your_api_key_here",
+        "HONEYBADGER_PROJECT_ID": "your_project_id"
+      }
+    }
+  }
+}
+```
+
+**Project-based Installation (Alternative):**
+
+If you prefer to manage the MCP server as a project dependency:
+
+```bash
+npm install honeybadger-mcp
+```
+
+In this case, the command in your Cursor `mcp_servers.json` would point to the local installation within your project's `node_modules`:
+
+```json
+{
+  "mcpServers": {
+    "honeybadger": {
+      "command": "node",
+      "args": ["./node_modules/honeybadger-mcp/dist/index.js"],
+      "env": {
+        "HONEYBADGER_API_KEY": "your_api_key_here",
+        "HONEYBADGER_PROJECT_ID": "your_project_id"
+      }
+    }
+  }
+}
+```
+
+### 4. Configure Environment Variables
 
 Create a `.env` file in your project root:
 
@@ -72,24 +123,15 @@ Add the MCP server to your Cursor configuration. Edit your `~/.cursor/mcp_server
 
 ### 2. Alternative: Global Installation
 
-For easier use across projects:
+This section will be updated or removed as it's now covered above. If you prefer the old way of cloning and installing globally from a local path, you can still do so, but using the published npm package is recommended for easier updates and management.
 
+If installing from a local clone:
 ```bash
-# Install globally
-npm install -g /path/to/honeybadger-mcp
+# Navigate to your cloned honeybadger-mcp directory
+npm install -g . # Installs from the current directory
 
-# Then configure in Cursor
-{
-  "mcpServers": {
-    "honeybadger": {
-      "command": "honeybadger-mcp",
-      "env": {
-        "HONEYBADGER_API_KEY": "your_api_key_here",
-        "HONEYBADGER_PROJECT_ID": "your_project_id"
-      }
-    }
-  }
-}
+# Then configure in Cursor as before
+# ... (Cursor configuration for local global install)
 ```
 
 ## Usage
