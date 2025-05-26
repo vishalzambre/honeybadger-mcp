@@ -1,5 +1,5 @@
 {
-  "name": "@vishalzambre/honeybadger-mcp",
+  "name": "honeybadger-mcp",
   "version": "0.2.1",
   "description": "Model Context Protocol server for Honeybadger integration",
   "main": "dist/index.js",
