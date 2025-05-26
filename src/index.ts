@@ -224,12 +224,16 @@ class HoneybadgerMCPServer {
       throw new McpError(ErrorCode.InvalidRequest, 'HONEYBADGER_API_KEY environment variable is required');
     }
 
+    const username = this.config.apiKey;
+    const password = '';
     const url = `${this.config.baseUrl}/v2${endpoint}`;
+    const credentials = Buffer.from(`${username}:${password}`).toString('base64');
+
 
     try {
       const response = await axios.get(url, {
         headers: {
-          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Authorization': `Basic ${credentials}`,
           'Accept': 'application/json',
         },
         params,
