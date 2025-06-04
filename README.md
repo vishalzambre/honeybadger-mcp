@@ -2,6 +2,8 @@
 
 This MCP server integrates Honeybadger error tracking with Cursor IDE, allowing you to fetch and analyze errors directly from your development environment.
 
+<a href="https://www.buymeacoffee.com/vishalzambre" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
 ## Prerequisites
 
 - Node.js 18+ installed
