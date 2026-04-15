@@ -35,7 +35,7 @@ npm run build
 **Global Installation:**
 
 ```bash
-npm install -g honeybadger-mcp
+npm install -g @vishalzambre/honeybadger-mcp
 ```
 
 Then configure it in Cursor:
@@ -59,7 +59,7 @@ Then configure it in Cursor:
 If you prefer to manage the MCP server as a project dependency:
 
 ```bash
-npm install honeybadger-mcp
+npm install @vishalzambre/honeybadger-mcp
 ```
 
 In this case, the command in your Cursor `mcp_servers.json` would point to the local installation within your project's `node_modules`:
@@ -69,7 +69,7 @@ In this case, the command in your Cursor `mcp_servers.json` would point to the l
   "mcpServers": {
     "honeybadger": {
       "command": "node",
-      "args": ["./node_modules/honeybadger-mcp/dist/index.js"],
+      "args": ["./node_modules/@vishalzambre/honeybadger-mcp/dist/index.js"],
       "env": {
         "HONEYBADGER_API_KEY": "your_api_key_here",
         "HONEYBADGER_PROJECT_ID": "your_project_id"
@@ -178,6 +178,8 @@ Lists recent faults with optional filtering by environment and resolved status.
 - `limit` (optional): Number of faults (default: 20, max: 100)
 - `environment` (optional): Filter by environment
 - `resolved` (optional): Filter by resolved status
+- `q` (optional): Honeybadger query string for additional filtering
+- `page_url` (optional): Use `links.next` or `links.prev` URL for pagination
 
 ### `get_honeybadger_fault`
 Fetches detailed information about a specific fault.
@@ -193,6 +195,8 @@ Fetches notices (error occurrences) for a specific fault.
 - `fault_id` (required): The fault ID
 - `project_id` (optional): Project ID
 - `limit` (optional): Number of notices (default: 10, max: 100)
+- `q` (optional): Honeybadger query string for additional filtering
+- `page_url` (optional): Use `links.next` or `links.prev` URL for pagination
 
 ### `analyze_honeybadger_issue`
 Provides comprehensive analysis with fix suggestions.
@@ -254,3 +258,11 @@ For issues with:
 - **This MCP server**: Check the code and configuration
 - **Honeybadger API**: Refer to [Honeybadger API docs](https://docs.honeybadger.io/api/)
 - **Cursor MCP integration**: Check Cursor documentation
+
+## Publishing
+
+This package is configured to publish to GitHub Packages:
+
+- Registry: `https://npm.pkg.github.com`
+- Package name: `@vishalzambre/honeybadger-mcp`
+- Workflow: `.github/workflows/npm-publish.yml` (triggers on release publish)

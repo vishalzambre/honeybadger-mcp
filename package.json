@@ -1,6 +1,6 @@
 {
-  "name": "honeybadger-mcp",
-  "version": "0.2.1",
+  "name": "@vishalzambre/honeybadger-mcp",
+  "version": "0.3.0",
   "description": "Model Context Protocol server for Honeybadger integration",
   "main": "dist/index.js",
   "type": "module",
@@ -36,5 +36,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vishalzambre/honeybadger-mcp.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }

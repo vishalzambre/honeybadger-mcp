@@ -70,7 +70,7 @@ class HoneybadgerMCPServer {
     this.server = new Server(
       {
         name: 'honeybadger-mcp',
-        version: '0.1.0',
+        version: '0.3.0',
         capabilities: {
           tools: {},
         },
@@ -128,6 +128,14 @@ class HoneybadgerMCPServer {
                   description: 'Number of notices to fetch (default: 10, max: 100)',
                   default: 10,
                 },
+                q: {
+                  type: 'string',
+                  description: 'Optional Honeybadger search query string for filtering notices',
+                },
+                page_url: {
+                  type: 'string',
+                  description: 'Optional pagination URL from previous response links.next/links.prev',
+                },
               },
               required: ['fault_id'],
             },
@@ -154,6 +162,14 @@ class HoneybadgerMCPServer {
                 resolved: {
                   type: 'boolean',
                   description: 'Filter by resolved status',
+                },
+                q: {
+                  type: 'string',
+                  description: 'Optional Honeybadger search query string for filtering faults',
+                },
+                page_url: {
+                  type: 'string',
+                  description: 'Optional pagination URL from previous response links.next/links.prev',
                 },
               },
               required: [],
@@ -199,7 +215,13 @@ class HoneybadgerMCPServer {
             return await this.getFault(args.fault_id as string, args.project_id as string | undefined);
 
           case 'get_honeybadger_notices':
-            return await this.getNotices(args.fault_id as string, args.project_id as string | undefined, args.limit as number | undefined);
+            return await this.getNotices(
+              args.fault_id as string,
+              args.project_id as string | undefined,
+              args.limit as number | undefined,
+              args.q as string | undefined,
+              args.page_url as string | undefined
+            );
 
           case 'list_honeybadger_faults':
             return await this.listFaults(args as any);
@@ -219,14 +241,16 @@ class HoneybadgerMCPServer {
     });
   }
 
-  private async makeHoneybadgerRequest(endpoint: string, params: any = {}) {
+  private async makeHoneybadgerRequest(endpointOrUrl: string, params: any = {}) {
     if (!this.config.apiKey) {
       throw new McpError(ErrorCode.InvalidRequest, 'HONEYBADGER_API_KEY environment variable is required');
     }
 
     const username = this.config.apiKey;
     const password = '';
-    const url = `${this.config.baseUrl}/v2${endpoint}`;
+    const url = endpointOrUrl.startsWith('http')
+      ? endpointOrUrl
+      : `${this.config.baseUrl}/v2${endpointOrUrl}`;
     const credentials = Buffer.from(`${username}:${password}`).toString('base64');
 
 
@@ -242,9 +266,13 @@ class HoneybadgerMCPServer {
       return response.data;
     } catch (error: any) {
       if (error.response) {
+        const apiError =
+          error.response.data?.error ||
+          error.response.data?.errors ||
+          error.response.statusText;
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `Honeybadger API error: ${error.response.status} - ${error.response.data?.error || error.response.statusText}`
+          `Honeybadger API error: ${error.response.status} - ${apiError}`
         );
       }
       throw new McpError(ErrorCode.InternalError, `Network error: ${error.message}`);
@@ -269,15 +297,27 @@ class HoneybadgerMCPServer {
     };
   }
 
-  private async getNotices(faultId: string, projectId?: string, limit: number = 10): Promise<any> {
+  private async getNotices(
+    faultId: string,
+    projectId?: string,
+    limit: number = 10,
+    q?: string,
+    pageUrl?: string
+  ): Promise<any> {
     const pid = projectId || this.config.projectId;
     if (!pid) {
       throw new McpError(ErrorCode.InvalidRequest, 'Project ID is required');
     }
 
-    const data = await this.makeHoneybadgerRequest(`/projects/${pid}/faults/${faultId}/notices`, {
+    const params: any = {
       limit: Math.min(limit, 100),
-    });
+    };
+    if (q) params.q = q;
+
+    const data = await this.makeHoneybadgerRequest(
+      pageUrl || `/projects/${pid}/faults/${faultId}/notices`,
+      pageUrl ? {} : params
+    );
 
     return {
       content: [
@@ -301,8 +341,9 @@ class HoneybadgerMCPServer {
 
     if (args.environment) params.environment = args.environment;
     if (typeof args.resolved === 'boolean') params.resolved = args.resolved;
+    if (args.q) params.q = args.q;
 
-    const data = await this.makeHoneybadgerRequest(`/projects/${pid}/faults`, params);
+    const data = await this.makeHoneybadgerRequest(args.page_url || `/projects/${pid}/faults`, args.page_url ? {} : params);
 
     return {
       content: [
@@ -329,7 +370,12 @@ class HoneybadgerMCPServer {
     });
 
     // Create comprehensive analysis
-    const analysis = this.generateAnalysis(fault, notices.results || [], includeContext);
+    const noticeResults = Array.isArray(notices?.results)
+      ? notices.results
+      : Array.isArray(notices)
+        ? notices
+        : [];
+    const analysis = this.generateAnalysis(fault, noticeResults, includeContext);
 
     return {
       content: [
