@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "honeybadger": {
+      "command": "honeybadger-mcp",
+      "env": {
+        "HONEYBADGER_API_KEY": "YOUR_PERSONAL_AUTH_TOKEN",
+        "HONEYBADGER_PROJECT_ID": "YOUR_PROJECT_ID",
+        "HONEYBADGER_BASE_URL": "https://app.honeybadger.io"
+      }
+    }
+  }
+}
