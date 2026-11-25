@@ -22,8 +22,8 @@
   "author": "Vishal Zambre",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0",
-    "axios": "^1.6.0"
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "axios": "^1.20.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
