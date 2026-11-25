@@ -25,18 +25,25 @@ Agent skill that installs/configures [@vishalzambre/honeybadger-mcp](https://git
 
 | Path | Purpose |
 |---|---|
-| `SKILL.md` | Agent instructions + frontmatter |
+| `SKILL.md` | Agent instructions + frontmatter (`name`, `description`) |
 | `references/setup.md` | Install, credentials, troubleshooting |
+| `examples/sample-runs.md` | Sample prompts, tool calls, and report shape |
 | `assets/mcp-config.template.json` | Global-binary MCP config |
 | `assets/mcp-config.local-path.template.json` | Local `node dist/index.js` config |
 
 ## Listing notes (Agensi)
 
-Suggested marketplace description:
+Paste these into Creator Studio. Leave the price at free so no Stripe or Zoneless payout setup is required.
 
-> Connect your coding agent to Honeybadger. List production faults, inspect notices, and get stack-aware fix suggestions via the Honeybadger MCP server — with copy-paste Cursor/Claude config and a clear investigation workflow.
+**Title:** Honeybadger MCP
 
-Suggested price: free (no payout setup required) or a low one-time price once Zoneless/Stripe payouts are connected.
+**Price:** Free
+
+**Description:**
+
+> Connect your coding agent to Honeybadger. This skill installs and configures the Honeybadger MCP server, then lists production faults, inspects notices, and returns stack-aware fix suggestions. Includes a Cursor and Claude config template plus setup instructions. Use it when debugging Honeybadger exceptions, unresolved production errors, or a specific fault ID.
+
+**Tags:** honeybadger, mcp, error-tracking, debugging, cursor
 
 ## License
 
