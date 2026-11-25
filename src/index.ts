@@ -1,560 +1,430 @@
 #!/usr/bin/env node
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { z, type ZodRawShape } from 'zod';
+import { formatAnalysis } from './analyze.js';
+import { HoneybadgerClient, type ApiResult } from './client.js';
+import { readFault } from './model.js';
 import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
-import axios from 'axios';
+  formatAffectedUsers,
+  formatDeploys,
+  formatFault,
+  formatFaultList,
+  formatNotices,
+  formatOccurrences,
+  formatProject,
+  formatProjectList,
+  formatRaw,
+  formatReport,
+  formatSummary,
+} from './present.js';
+import {
+  buildFaultListRequest,
+  buildFaultQuery,
+  clampLimit,
+  optionalString,
+  readFaultQueryArgs,
+  unixSeconds,
+} from './search.js';
 
-interface HoneybadgerConfig {
-  apiKey: string;
-  projectId?: string;
-  baseUrl?: string;
+const VERSION = '0.4.0';
+
+const READ_ONLY = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+const projectId = z
+  .string()
+  .optional()
+  .describe('Project ID. Defaults to HONEYBADGER_PROJECT_ID. Call list_honeybadger_projects to find it.');
+
+const faultId = z.string().describe('Fault ID');
+
+const raw = z.boolean().optional().describe('Return redacted JSON instead of the summary');
+
+const searchArgs = {
+  q: z
+    .string()
+    .optional()
+    .describe(
+      'Honeybadger search string. Examples: class:NoMethodError, environment:production, -is:resolved -is:ignored, last_occurred.after:"24 hours ago", created.after:"last deploy", context.user_email:a@b.com. Do not use is:unresolved (it is not a filter and matches everything). Do not use assignee:me (it matches nothing on the API; use an email, assignee:nobody, or assignee:anybody).'
+    ),
+  environment: z.string().optional().describe('Added to q as environment:"name"'),
+  resolved: z
+    .boolean()
+    .optional()
+    .describe('true adds is:resolved. false adds -is:resolved. Omit it to use state.'),
+  ignored: z.boolean().optional().describe('true adds is:ignored. false adds -is:ignored.'),
+  state: z
+    .enum(['open', 'resolved', 'ignored', 'unresolved', 'all'])
+    .optional()
+    .describe('Status filter when resolved/ignored are omitted. Defaults to open (-is:resolved -is:ignored) unless q already sets status.'),
+  occurred_after: z.union([z.string(), z.number()]).optional().describe('Unix seconds or ISO-8601. Limits notices counted in the window.'),
+  occurred_before: z.union([z.string(), z.number()]).optional().describe('Unix seconds or ISO-8601'),
+  created_after: z.union([z.string(), z.number()]).optional().describe('Unix seconds or ISO-8601. First-seen time.'),
+};
+
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+
+function textResult(text: string): ToolResult {
+  return { content: [{ type: 'text', text }] };
 }
 
-interface HoneybadgerFault {
-  id: string;
-  klass: string;
-  message: string;
-  environment: string;
-  project_id: number;
-  created_at: string;
-  last_notice_at: string;
-  notices_count: number;
-  url: string;
-  assignee?: {
-    id: number;
-    name: string;
-    email: string;
-  };
-  tags: string[];
-  resolved: boolean;
-}
-
-interface HoneybadgerNotice {
-  id: string;
-  fault_id: string;
-  message: string;
-  backtrace: Array<{
-    number: string;
-    file: string;
-    method: string;
-    source?: { [line: string]: string };
-  }>;
-  environment_name: string;
-  occurred_at: string;
-  url: string;
-  context: {
-    [key: string]: any;
-  };
-  params: {
-    [key: string]: any;
-  };
-  session: {
-    [key: string]: any;
-  };
-  cgi_data: {
-    [key: string]: any;
-  };
+function errorResult(error: unknown): ToolResult {
+  const message = error instanceof Error ? error.message : 'Honeybadger tool failed';
+  return { isError: true, content: [{ type: 'text', text: message }] };
 }
 
 class HoneybadgerMCPServer {
-  private server: Server;
-  private config: HoneybadgerConfig;
+  private server = new McpServer({ name: 'honeybadger-mcp', version: VERSION });
+  private client: HoneybadgerClient;
 
   constructor() {
-    this.server = new Server(
-      {
-        name: 'honeybadger-mcp',
-        version: '0.3.0',
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Get configuration from environment variables
-    this.config = {
+    this.client = new HoneybadgerClient({
       apiKey: process.env.HONEYBADGER_API_KEY || '',
       projectId: process.env.HONEYBADGER_PROJECT_ID,
       baseUrl: process.env.HONEYBADGER_BASE_URL || 'https://app.honeybadger.io',
-    };
-
-    this.setupToolHandlers();
-  }
-
-  private setupToolHandlers() {
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: [
-          {
-            name: 'get_honeybadger_fault',
-            description: 'Fetch a specific fault/error from Honeybadger by ID',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                fault_id: {
-                  type: 'string',
-                  description: 'The ID of the fault to fetch',
-                },
-                project_id: {
-                  type: 'string',
-                  description: 'Optional project ID (uses env var if not provided)',
-                },
-              },
-              required: ['fault_id'],
-            },
-          },
-          {
-            name: 'get_honeybadger_notices',
-            description: 'Fetch notices (occurrences) for a specific fault',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                fault_id: {
-                  type: 'string',
-                  description: 'The ID of the fault to fetch notices for',
-                },
-                project_id: {
-                  type: 'string',
-                  description: 'Optional project ID (uses env var if not provided)',
-                },
-                limit: {
-                  type: 'number',
-                  description: 'Number of notices to fetch (default: 10, max: 100)',
-                  default: 10,
-                },
-                q: {
-                  type: 'string',
-                  description: 'Optional Honeybadger search query string for filtering notices',
-                },
-                page_url: {
-                  type: 'string',
-                  description: 'Optional pagination URL from previous response links.next/links.prev',
-                },
-              },
-              required: ['fault_id'],
-            },
-          },
-          {
-            name: 'list_honeybadger_faults',
-            description: 'List recent faults from Honeybadger',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                project_id: {
-                  type: 'string',
-                  description: 'Optional project ID (uses env var if not provided)',
-                },
-                limit: {
-                  type: 'number',
-                  description: 'Number of faults to fetch (default: 20, max: 100)',
-                  default: 20,
-                },
-                environment: {
-                  type: 'string',
-                  description: 'Filter by environment (e.g., production, staging)',
-                },
-                resolved: {
-                  type: 'boolean',
-                  description: 'Filter by resolved status',
-                },
-                q: {
-                  type: 'string',
-                  description: 'Optional Honeybadger search query string for filtering faults',
-                },
-                page_url: {
-                  type: 'string',
-                  description: 'Optional pagination URL from previous response links.next/links.prev',
-                },
-              },
-              required: [],
-            },
-          },
-          {
-            name: 'analyze_honeybadger_issue',
-            description: 'Comprehensive analysis of a Honeybadger issue with fix suggestions',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                fault_id: {
-                  type: 'string',
-                  description: 'The ID of the fault to analyze',
-                },
-                project_id: {
-                  type: 'string',
-                  description: 'Optional project ID (uses env var if not provided)',
-                },
-                include_context: {
-                  type: 'boolean',
-                  description: 'Include request context and parameters in analysis',
-                  default: true,
-                },
-              },
-              required: ['fault_id'],
-            },
-          },
-        ],
-      };
     });
-
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
-      if (!args) {
-        throw new McpError(ErrorCode.InvalidRequest, 'Tool arguments are missing');
-      }
-
-      try {
-        switch (name) {
-          case 'get_honeybadger_fault':
-            return await this.getFault(args.fault_id as string, args.project_id as string | undefined);
-
-          case 'get_honeybadger_notices':
-            return await this.getNotices(
-              args.fault_id as string,
-              args.project_id as string | undefined,
-              args.limit as number | undefined,
-              args.q as string | undefined,
-              args.page_url as string | undefined
-            );
-
-          case 'list_honeybadger_faults':
-            return await this.listFaults(args as any);
-
-          case 'analyze_honeybadger_issue':
-            return await this.analyzeIssue(args.fault_id as string, args.project_id as string | undefined, args.include_context as boolean | undefined);
-
-          default:
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        }
-      } catch (error) {
-        if (error instanceof McpError) {
-          throw error;
-        }
-        throw new McpError(ErrorCode.InternalError, `Tool execution failed: ${error}`);
-      }
-    });
+    this.registerTools();
   }
 
-  private async makeHoneybadgerRequest(endpointOrUrl: string, params: any = {}) {
-    if (!this.config.apiKey) {
-      throw new McpError(ErrorCode.InvalidRequest, 'HONEYBADGER_API_KEY environment variable is required');
-    }
-
-    const username = this.config.apiKey;
-    const password = '';
-    const url = endpointOrUrl.startsWith('http')
-      ? endpointOrUrl
-      : `${this.config.baseUrl}/v2${endpointOrUrl}`;
-    const credentials = Buffer.from(`${username}:${password}`).toString('base64');
-
-
-    try {
-      const response = await axios.get(url, {
-        headers: {
-          'Authorization': `Basic ${credentials}`,
-          'Accept': 'application/json',
-        },
-        params,
-      });
-
-      return response.data;
-    } catch (error: any) {
-      if (error.response) {
-        const apiError =
-          error.response.data?.error ||
-          error.response.data?.errors ||
-          error.response.statusText;
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          `Honeybadger API error: ${error.response.status} - ${apiError}`
-        );
-      }
-      throw new McpError(ErrorCode.InternalError, `Network error: ${error.message}`);
-    }
-  }
-
-  private async getFault(faultId: string, projectId?: string): Promise<any> {
-    const pid = projectId || this.config.projectId;
-    if (!pid) {
-      throw new McpError(ErrorCode.InvalidRequest, 'Project ID is required');
-    }
-
-    const data = await this.makeHoneybadgerRequest(`/projects/${pid}/faults/${faultId}`);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getNotices(
-    faultId: string,
-    projectId?: string,
-    limit: number = 10,
-    q?: string,
-    pageUrl?: string
-  ): Promise<any> {
-    const pid = projectId || this.config.projectId;
-    if (!pid) {
-      throw new McpError(ErrorCode.InvalidRequest, 'Project ID is required');
-    }
-
-    const params: any = {
-      limit: Math.min(limit, 100),
-    };
-    if (q) params.q = q;
-
-    const data = await this.makeHoneybadgerRequest(
-      pageUrl || `/projects/${pid}/faults/${faultId}/notices`,
-      pageUrl ? {} : params
+  private registerTools(): void {
+    this.tool(
+      'list_honeybadger_projects',
+      'List Honeybadger projects visible to this token: id, name, environments, and unresolved fault counts. Project API tokens are omitted.',
+      { account_id: z.string().optional().describe('Limit the list to one account'), raw },
+      (args) => this.listProjects(args)
     );
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
+    this.tool(
+      'get_honeybadger_project',
+      'Get one Honeybadger project, including environments and team emails. Use an email with assignee:email in fault search. assignee:me does not work on the API. The project API token is omitted.',
+      { project_id: projectId, raw },
+      (args) => this.getProject(args)
+    );
+
+    this.tool(
+      'list_honeybadger_faults',
+      'List faults (errors) for a project. Defaults to open faults (-is:resolved -is:ignored), most recently seen first. Honeybadger returns at most 25 per request. environment and resolved are folded into the q search string; they are not separate API parameters.',
+      {
+        project_id: projectId,
+        limit: z.number().optional().describe('Page size. Default 20, maximum 25.'),
+        order: z.enum(['recent', 'frequent', 'created']).optional().describe('recent = last seen, frequent = most notices, created = oldest first. Default recent.'),
+        page_url: z.string().optional().describe('Next-page URL previously returned by this tool. Replaces q, order, and limit.'),
+        ...searchArgs,
+        raw,
+      },
+      (args) => this.listFaults(args)
+    );
+
+    this.tool(
+      'get_honeybadger_fault',
+      'Fetch one fault: class, message, environment, status, counts, assignee, tags, and the Honeybadger URL.',
+      { project_id: projectId, fault_id: faultId, raw },
+      (args) => this.getFault(args)
+    );
+
+    this.tool(
+      'get_honeybadger_notices',
+      'Fetch occurrences of a fault. Returns the application stack, request URL, user, and redacted context/params. Cookies, session, and secrets are omitted. The v2 API returns at most 25 notices, newest first.',
+      {
+        project_id: projectId,
+        fault_id: faultId,
+        limit: z.number().optional().describe('How many notices to return. Default 10, maximum 25.'),
+        created_after: searchArgs.created_after,
+        created_before: z.union([z.string(), z.number()]).optional().describe('Unix seconds or ISO-8601'),
+        page_url: z.string().optional().describe('Next-page URL previously returned by this tool'),
+        raw,
+      },
+      (args) => this.getNotices(args)
+    );
+
+    this.tool(
+      'summarize_honeybadger_faults',
+      'Count faults for a project, using the same search rules as list_honeybadger_faults. Use this before listing when you only need how many errors are open.',
+      { project_id: projectId, ...searchArgs, raw },
+      (args) => this.summarizeFaults(args)
+    );
+
+    this.tool(
+      'get_honeybadger_occurrences',
+      'Occurrence counts over time. Pass fault_id for one error (default period day). Omit fault_id for the whole project (default period hour). period is hour, day, week, or month. Buckets are UTC.',
+      {
+        project_id: projectId,
+        fault_id: z.string().optional().describe('Fault ID. Omit for project-wide counts.'),
+        period: z.enum(['hour', 'day', 'week', 'month']).optional(),
+        environment: z.string().optional().describe('Project-wide counts only'),
+      },
+      (args) => this.getOccurrences(args)
+    );
+
+    this.tool(
+      'list_honeybadger_affected_users',
+      'Users affected by one fault, most-affected first. Empty when the app does not send a user id or email.',
+      {
+        project_id: projectId,
+        fault_id: faultId,
+        q: z.string().optional().describe('Optional Honeybadger search string applied to the affected-user list'),
+      },
+      (args) => this.listAffectedUsers(args)
+    );
+
+    this.tool(
+      'list_honeybadger_deploys',
+      'Recent deploys for a project, newest first. Use this to see whether an error started after a release. Deploy time is a clue, not proof of cause.',
+      {
+        project_id: projectId,
+        environment: z.string().optional(),
+        local_username: z.string().optional().describe('Username recorded on the deploy'),
+        limit: z.number().optional().describe('Default 10, maximum 25'),
+        created_after: searchArgs.created_after,
+        created_before: z.union([z.string(), z.number()]).optional(),
+      },
+      (args) => this.listDeploys(args)
+    );
+
+    this.tool(
+      'get_honeybadger_report',
+      'Project report from the Honeybadger Reports tab: notices grouped by class, location, user, or day.',
+      {
+        project_id: projectId,
+        report: z.enum(['notices_by_class', 'notices_by_location', 'notices_by_user', 'notices_per_day']),
+        environment: z.string().optional(),
+        start: z.string().optional().describe('ISO-8601 start of the reporting window'),
+        stop: z.string().optional().describe('ISO-8601 end of the reporting window'),
+      },
+      (args) => this.getReport(args)
+    );
+
+    this.tool(
+      'analyze_honeybadger_issue',
+      'Investigate one fault: status, application stack, redacted request context, daily occurrence counts, recent deploys in that environment, and affected users. Cookies and secrets are omitted. This does not change the fault in Honeybadger.',
+      {
+        project_id: projectId,
+        fault_id: faultId,
+        include_context: z.boolean().optional().describe('Include redacted request context and params. Default true.'),
+      },
+      (args) => this.analyzeIssue(args)
+    );
   }
 
-  private async listFaults(args: any): Promise<any> {
-    const pid = args.project_id || this.config.projectId;
-    if (!pid) {
-      throw new McpError(ErrorCode.InvalidRequest, 'Project ID is required');
-    }
-
-    const params: any = {
-      limit: Math.min(args.limit || 20, 100),
-    };
-
-    if (args.environment) params.environment = args.environment;
-    if (typeof args.resolved === 'boolean') params.resolved = args.resolved;
-    if (args.q) params.q = args.q;
-
-    const data = await this.makeHoneybadgerRequest(args.page_url || `/projects/${pid}/faults`, args.page_url ? {} : params);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async analyzeIssue(faultId: string, projectId?: string, includeContext: boolean = true): Promise<any> {
-    const pid = projectId || this.config.projectId;
-    if (!pid) {
-      throw new McpError(ErrorCode.InvalidRequest, 'Project ID is required');
-    }
-
-    // Fetch fault details
-    const fault = await this.makeHoneybadgerRequest(`/projects/${pid}/faults/${faultId}`);
-
-    // Fetch recent notices
-    const notices = await this.makeHoneybadgerRequest(`/projects/${pid}/faults/${faultId}/notices`, {
-      limit: 5,
+  private tool(
+    name: string,
+    description: string,
+    inputSchema: ZodRawShape,
+    handler: (args: Record<string, unknown>) => Promise<string>
+  ): void {
+    // registerTool's zod generics blow up when the schema is a ZodRawShape variable.
+    const register = this.server.registerTool.bind(this.server) as (
+      toolName: string,
+      config: { description: string; inputSchema: ZodRawShape; annotations: typeof READ_ONLY },
+      cb: (args: Record<string, unknown>) => Promise<ToolResult>
+    ) => void;
+    register(name, { description, inputSchema, annotations: READ_ONLY }, async (args) => {
+      try {
+        return textResult(await handler(args));
+      } catch (error) {
+        return errorResult(error);
+      }
     });
-
-    // Create comprehensive analysis
-    const noticeResults = Array.isArray(notices?.results)
-      ? notices.results
-      : Array.isArray(notices)
-        ? notices
-        : [];
-    const analysis = this.generateAnalysis(fault, noticeResults, includeContext);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: analysis,
-        },
-      ],
-    };
   }
 
-  private generateAnalysis(fault: HoneybadgerFault, notices: HoneybadgerNotice[], includeContext: boolean): string {
-    const latestNotice = notices[0];
+  private async listProjects(args: Record<string, unknown>): Promise<string> {
+    const accountId = optionalString(args.account_id);
+    const result = await this.client.get('/projects', { account_id: accountId });
+    return wantRaw(args.raw) ? formatRaw(result.data) : formatProjectList(result.data);
+  }
 
-    let analysis = `# Honeybadger Issue Analysis
+  private async getProject(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const result = await this.client.get(`/projects/${projectIdValue}`);
+    return wantRaw(args.raw) ? formatRaw(result.data) : formatProject(result.data);
+  }
 
-## Fault Overview
-- **ID**: ${fault.id}
-- **Error Class**: ${fault.klass}
-- **Message**: ${fault.message}
-- **Environment**: ${fault.environment}
-- **Occurrences**: ${fault.notices_count}
-- **First Seen**: ${fault.created_at}
-- **Last Seen**: ${fault.last_notice_at}
-- **Status**: ${fault.resolved ? 'Resolved' : 'Unresolved'}
-- **URL**: ${fault.url}
-
-## Error Analysis
-
-### Error Type
-The error "${fault.klass}" suggests:`;
-
-    // Add error type analysis
-    if (fault.klass.includes('NoMethodError')) {
-      analysis += `
-- A method is being called on an object that doesn't respond to it
-- Possible nil object or wrong object type
-- Missing method definition or typo in method name`;
-    } else if (fault.klass.includes('NameError')) {
-      analysis += `
-- Undefined variable or constant
-- Typo in variable/constant name
-- Scope issues`;
-    } else if (fault.klass.includes('ArgumentError')) {
-      analysis += `
-- Wrong number of arguments passed to a method
-- Invalid argument values
-- Method signature mismatch`;
-    } else if (fault.klass.includes('ActiveRecord')) {
-      analysis += `
-- Database-related error
-- Possible migration issues
-- Invalid queries or constraints`;
-    } else {
-      analysis += `
-- Review the specific error class documentation
-- Check for common patterns in this error type`;
-    }
-
-    if (latestNotice) {
-      analysis += `
-
-### Stack Trace Analysis
-`;
-
-      // Analyze backtrace
-      const backtrace = latestNotice.backtrace?.slice(0, 10) || [];
-      backtrace.forEach((frame, index) => {
-        if (index === 0) {
-          analysis += `
-**Primary Error Location:**
-- File: \`${frame.file}\`
-- Method: \`${frame.method}\`
-- Line: ${frame.number}`;
-
-          if (frame.source) {
-            analysis += `
-- Context:
-\`\`\`
-${Object.entries(frame.source).map(([line, code]) => `${line}: ${code}`).join('\n')}
-\`\`\``;
-          }
-        } else if (index < 5) {
-          analysis += `
-- ${frame.file}:${frame.number} in \`${frame.method}\``;
-        }
+  private async listFaults(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const pageUrl = optionalString(args.page_url);
+    if (pageUrl) {
+      const result = await this.client.get(pageUrl);
+      if (wantRaw(args.raw)) return formatRaw(result.data);
+      return formatFaultList(result.data, {
+        projectId: projectIdValue,
+        query: '(from page_url)',
+        order: 'from page_url',
+        limit: 0,
+        nextUrl: result.nextUrl,
       });
-
-      if (includeContext && latestNotice.context) {
-        analysis += `
-
-### Request Context
-\`\`\`json
-${JSON.stringify(latestNotice.context, null, 2)}
-\`\`\``;
-      }
-
-      if (includeContext && latestNotice.params && Object.keys(latestNotice.params).length > 0) {
-        analysis += `
-
-### Request Parameters
-\`\`\`json
-${JSON.stringify(latestNotice.params, null, 2)}
-\`\`\``;
-      }
     }
 
-    analysis += `
-
-## Recommended Fix Strategies
-
-### Immediate Actions
-1. **Reproduce the Error**
-   - Use the provided context and parameters
-   - Set up similar conditions in development
-   - Add logging around the error location
-
-2. **Quick Fixes**`;
-
-    // Add specific fix suggestions based on error type
-    if (fault.klass.includes('NoMethodError')) {
-      analysis += `
-   - Add nil checks: \`object&.method_name\`
-   - Verify object type before method calls
-   - Check method spelling and availability`;
-    } else if (fault.klass.includes('ArgumentError')) {
-      analysis += `
-   - Review method signatures
-   - Validate input parameters
-   - Add parameter validation`;
-    } else if (fault.klass.includes('ActiveRecord')) {
-      analysis += `
-   - Check database migrations
-   - Validate model associations
-   - Review query syntax`;
-    }
-
-    analysis += `
-
-### Long-term Solutions
-1. **Add Error Handling**
-   - Implement proper exception handling
-   - Add user-friendly error messages
-   - Log detailed error information
-
-2. **Add Tests**
-   - Write unit tests covering the error scenario
-   - Add integration tests for the affected flow
-   - Include edge case testing
-
-3. **Code Review**
-   - Review similar patterns in codebase
-   - Look for related potential issues
-   - Implement defensive programming practices
-
-### Monitoring
-- Set up alerts for this error pattern
-- Monitor error frequency after fixes
-- Track related errors that might emerge
-
-## Next Steps
-1. Examine the code at the primary error location
-2. Set up local reproduction using the provided context
-3. Implement the recommended fixes
-4. Add appropriate tests
-5. Deploy and monitor the fix effectiveness
-
----
-*Analysis generated from Honeybadger fault #${fault.id}*`;
-
-    return analysis;
+    const request = buildFaultListRequest(readFaultQueryArgs(args, 20));
+    const result = await this.client.get(`/projects/${projectIdValue}/faults`, request.params);
+    if (wantRaw(args.raw)) return formatRaw(result.data);
+    return formatFaultList(result.data, {
+      projectId: projectIdValue,
+      query: request.query,
+      order: request.order,
+      limit: request.limit,
+      limitNote: request.limitNote,
+      nextUrl: result.nextUrl,
+    });
   }
 
-  async run() {
+  private async getFault(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const fault = this.client.requireId(args.fault_id, 'fault_id');
+    const result = await this.client.get(`/projects/${projectIdValue}/faults/${fault}`);
+    return wantRaw(args.raw) ? formatRaw(result.data) : formatFault(result.data);
+  }
+
+  private async getNotices(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const fault = this.client.requireId(args.fault_id, 'fault_id');
+    const pageUrl = optionalString(args.page_url);
+    const { limit, limitNote } = clampLimit(args.limit, 10);
+    const result = pageUrl
+      ? await this.client.get(pageUrl)
+      : await this.client.get(`/projects/${projectIdValue}/faults/${fault}/notices`, {
+          limit,
+          created_after: unixSeconds(args.created_after, 'created_after'),
+          created_before: unixSeconds(args.created_before, 'created_before'),
+        });
+    if (wantRaw(args.raw)) return formatRaw(result.data);
+    return formatNotices(result.data, {
+      faultId: fault,
+      projectId: projectIdValue,
+      limitNote,
+      nextUrl: result.nextUrl,
+    });
+  }
+
+  private async summarizeFaults(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const query = buildFaultQuery(readFaultQueryArgs(args));
+    const params = {
+      q: query,
+      occurred_after: unixSeconds(args.occurred_after, 'occurred_after'),
+      occurred_before: unixSeconds(args.occurred_before, 'occurred_before'),
+      created_after: unixSeconds(args.created_after, 'created_after'),
+    };
+    const result = await this.client.get(`/projects/${projectIdValue}/faults/summary`, params);
+    return wantRaw(args.raw) ? formatRaw(result.data) : formatSummary(result.data, { projectId: projectIdValue, query });
+  }
+
+  private async getOccurrences(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const period = readChoice(args.period, ['hour', 'day', 'week', 'month'] as const, 'period');
+    const fault = args.fault_id == null || args.fault_id === '' ? undefined : this.client.requireId(args.fault_id, 'fault_id');
+    if (fault) {
+      const used = period ?? 'day';
+      const result = await this.client.get(`/projects/${projectIdValue}/faults/${fault}/occurrences`, { period: used });
+      return formatOccurrences(result.data, { label: `fault ${fault}`, period: used });
+    }
+    const used = period ?? 'hour';
+    const environment = optionalString(args.environment);
+    const result = await this.client.get(`/projects/${projectIdValue}/occurrences`, { period: used, environment });
+    return formatOccurrences(result.data, { label: `project ${projectIdValue}`, period: used, environment });
+  }
+
+  private async listAffectedUsers(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const fault = this.client.requireId(args.fault_id, 'fault_id');
+    const result = await this.client.get(`/projects/${projectIdValue}/faults/${fault}/affected_users`, {
+      q: optionalString(args.q),
+    });
+    return formatAffectedUsers(result.data, { faultId: fault });
+  }
+
+  private async listDeploys(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const { limit, limitNote } = clampLimit(args.limit, 10);
+    const environment = optionalString(args.environment);
+    const result = await this.client.get(`/projects/${projectIdValue}/deploys`, {
+      limit,
+      environment,
+      local_username: optionalString(args.local_username),
+      created_after: unixSeconds(args.created_after, 'created_after'),
+      created_before: unixSeconds(args.created_before, 'created_before'),
+    });
+    const text = formatDeploys(result.data, { projectId: projectIdValue, environment });
+    return limitNote ? `${text}\n\n${limitNote}` : text;
+  }
+
+  private async getReport(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const report = readChoice(
+      args.report,
+      ['notices_by_class', 'notices_by_location', 'notices_by_user', 'notices_per_day'] as const,
+      'report'
+    );
+    if (!report) throw new McpError(ErrorCode.InvalidRequest, 'report is required');
+    const environment = optionalString(args.environment);
+    const start = optionalString(args.start);
+    const stop = optionalString(args.stop);
+    const result = await this.client.get(`/projects/${projectIdValue}/reports/${report}`, { environment, start, stop });
+    return formatReport(report, result.data, { projectId: projectIdValue, environment, start, stop });
+  }
+
+  private async analyzeIssue(args: Record<string, unknown>): Promise<string> {
+    const projectIdValue = this.client.projectId(args.project_id);
+    const fault = this.client.requireId(args.fault_id, 'fault_id');
+    const includeContext = args.include_context !== false;
+    const faultResult = await this.client.get(`/projects/${projectIdValue}/faults/${fault}`);
+    const environment = readFault(faultResult.data).environment || undefined;
+
+    const [notices, occurrences, deploys, users] = await Promise.all([
+      settle('notices', () => this.client.get(`/projects/${projectIdValue}/faults/${fault}/notices`, { limit: 5 })),
+      settle('occurrence counts', () =>
+        this.client.get(`/projects/${projectIdValue}/faults/${fault}/occurrences`, { period: 'day' })
+      ),
+      settle('deploys', () => this.client.get(`/projects/${projectIdValue}/deploys`, { limit: 5, environment })),
+      settle('affected users', () => this.client.get(`/projects/${projectIdValue}/faults/${fault}/affected_users`)),
+    ]);
+
+    return formatAnalysis({
+      fault: faultResult.data,
+      notices: notices.data ?? [],
+      occurrences: occurrences.data,
+      deploys: deploys.data,
+      affectedUsers: users.data,
+      includeContext,
+      notes: [notices.note, occurrences.note, deploys.note, users.note].filter((note): note is string => Boolean(note)),
+    });
+  }
+
+  async run(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('Honeybadger MCP server running on stdio');
+    console.error(`Honeybadger MCP server ${VERSION} running on stdio`);
   }
 }
 
+async function settle(label: string, request: () => Promise<ApiResult>): Promise<{ data?: unknown; note?: string }> {
+  try {
+    const result = await request();
+    return { data: result.data };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { note: `Could not load ${label}: ${message}` };
+  }
+}
+
+function wantRaw(value: unknown): boolean {
+  return value === true;
+}
+
+function readChoice<T extends string>(value: unknown, allowed: readonly T[], label: string): T | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'string' && (allowed as readonly string[]).includes(value)) return value as T;
+  throw new McpError(ErrorCode.InvalidRequest, `${label} must be one of: ${allowed.join(', ')}`);
+}
+
 const server = new HoneybadgerMCPServer();
-server.run().catch(console.error);
+server.run().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

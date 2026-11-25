@@ -115,7 +115,7 @@ HONEYBADGER_BASE_URL=https://app.honeybadger.io
 ## Verify
 
 1. Restart the agent so MCP reloads.
-2. Confirm tools appear: `list_honeybadger_faults`, `get_honeybadger_fault`, `get_honeybadger_notices`, `analyze_honeybadger_issue`.
+2. Confirm tools appear, including `list_honeybadger_projects`, `list_honeybadger_faults`, `get_honeybadger_notices`, `list_honeybadger_deploys`, and `analyze_honeybadger_issue`.
 3. Ask: "List recent unresolved Honeybadger faults."
 
 ## Common errors

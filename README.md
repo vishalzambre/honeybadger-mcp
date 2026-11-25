@@ -168,43 +168,67 @@ Analyze Honeybadger issue 12345 and provide fix suggestions
 Get the latest 5 occurrences for Honeybadger fault 12345
 ```
 
+### 5. Compare with deploys
+
+```
+Show recent production deploys and whether fault 12345 started after one
+```
+
 ## Available Tools
 
+Version 0.4.0. Every tool is read-only. Responses omit project API tokens, cookies, sessions, and secret-looking fields. The Honeybadger v2 API returns at most 25 faults or notices per request.
+
+Fault search uses Honeybadger's `q` syntax. `environment` and `resolved` are translated into that string. `is:unresolved` is not a real filter. `assignee:me` matches nothing on the API; use an email from `get_honeybadger_project`, or `assignee:nobody` / `assignee:anybody`.
+
+### `list_honeybadger_projects`
+Lists projects for this token: id, name, environments, and unresolved counts.
+
+### `get_honeybadger_project`
+One project, including environments and team emails.
+
 ### `list_honeybadger_faults`
-Lists recent faults with optional filtering by environment and resolved status.
+Lists faults. Defaults to open faults (`-is:resolved -is:ignored`) ordered by last seen (`recent`).
 
 **Parameters:**
 - `project_id` (optional): Project ID
-- `limit` (optional): Number of faults (default: 20, max: 100)
-- `environment` (optional): Filter by environment
-- `resolved` (optional): Filter by resolved status
-- `q` (optional): Honeybadger query string for additional filtering
-- `page_url` (optional): Use `links.next` or `links.prev` URL for pagination
+- `limit` (optional): Default 20, maximum 25
+- `order` (optional): `recent`, `frequent`, or `created`
+- `environment` (optional): Folded into `q` as `environment:name`
+- `resolved` / `ignored` (optional): Folded into `q`
+- `state` (optional): `open` (default), `resolved`, `ignored`, `unresolved`, or `all`
+- `q` (optional): Honeybadger search string
+- `occurred_after`, `occurred_before`, `created_after` (optional): Unix seconds or ISO-8601
+- `page_url` (optional): Next-page URL from a previous response
+- `raw` (optional): Redacted JSON instead of the summary
 
 ### `get_honeybadger_fault`
-Fetches detailed information about a specific fault.
-
-**Parameters:**
-- `fault_id` (required): The fault ID
-- `project_id` (optional): Project ID
+One fault: class, message, status, counts, assignee, tags, and URL.
 
 ### `get_honeybadger_notices`
-Fetches notices (error occurrences) for a specific fault.
+Occurrences for a fault, including the application stack, request URL, user, and redacted context. Default 10, maximum 25.
 
-**Parameters:**
-- `fault_id` (required): The fault ID
-- `project_id` (optional): Project ID
-- `limit` (optional): Number of notices (default: 10, max: 100)
-- `q` (optional): Honeybadger query string for additional filtering
-- `page_url` (optional): Use `links.next` or `links.prev` URL for pagination
+### `summarize_honeybadger_faults`
+Fault counts for the same search used by `list_honeybadger_faults`.
+
+### `get_honeybadger_occurrences`
+Occurrence buckets. Pass `fault_id` for one error (default period `day`), or omit it for the project (default period `hour`).
+
+### `list_honeybadger_affected_users`
+Users hit by one fault.
+
+### `list_honeybadger_deploys`
+Recent deploys, optionally filtered by `environment`.
+
+### `get_honeybadger_report`
+`notices_by_class`, `notices_by_location`, `notices_by_user`, or `notices_per_day`.
 
 ### `analyze_honeybadger_issue`
-Provides comprehensive analysis with fix suggestions.
+One fault plus its latest notices, daily counts, recent deploys, and affected users, with the application frame called out.
 
 **Parameters:**
-- `fault_id` (required): The fault ID
-- `project_id` (optional): Project ID
-- `include_context` (optional): Include request context (default: true)
+- `fault_id` (required)
+- `project_id` (optional)
+- `include_context` (optional): Include redacted request context and params (default true)
 
 ## Example Workflow
 
@@ -242,6 +266,7 @@ Check Cursor logs for MCP-related issues:
 - Use environment-specific API keys when possible
 - Consider using read-only API tokens for this integration
 - Regularly rotate your API keys
+- Tool output drops project API tokens and redacts cookies, sessions, and secret-looking fields
 
 ## Contributing
 
